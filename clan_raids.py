@@ -35,7 +35,7 @@ BUNGIE_NAME = "Peppy#4787"   # used only to find which clan to pull
 
 # How many clan members must be in the fireteam for it to count as a clan raid.
 # 2 = you plus one clanmate. Bump to 3 if you want a stricter definition.
-MIN_CLAN_MEMBERS = 2
+MIN_CLAN_MEMBERS = 3
 
 # Only count runs that were actually completed (vs. wipes and bailouts).
 COMPLETED_ONLY = True
