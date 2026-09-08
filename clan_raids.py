@@ -21,6 +21,7 @@ import os
 import sys
 import time
 from collections import defaultdict
+from itertools import combinations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,9 @@ MIN_CLAN_MEMBERS = 3
 
 # Only count runs that were actually completed (vs. wipes and bailouts).
 COMPLETED_ONLY = True
+
+# Pantheon is a boss-rush event, not a raid, but Bungie files it under the same
+# activity mode. Set False to count it.
 EXCLUDE_PANTHEON = True
 EXCLUDED_HASHES = set()
 
@@ -46,6 +50,7 @@ API_KEY = os.environ.get("BUNGIE_API_KEY")
 BASE = "https://www.bungie.net/Platform"
 CACHE = Path(__file__).parent / "cache"
 OUT = Path(__file__).parent / "index.html"
+PAGE_URL = os.environ.get("PAGE_URL", "")
 
 RAID_MODE = 4          # DestinyActivityModeType.Raid (dungeons are 82)
 PAGE_SIZE = 250
@@ -258,12 +263,15 @@ def main():
     print(f"Clan: {clan_name} ({group_id})")
 
     roster = get_roster(group_id)
-    print(f"{len(roster)} members. Pulling raid history (cached after first run)...")
+
     global EXCLUDED_HASHES
     names = get_activity_names()
     if EXCLUDE_PANTHEON:
         EXCLUDED_HASHES = {h for h, n in names.items() if "pantheon" in n.lower()}
         print(f"Excluding {len(EXCLUDED_HASHES)} Pantheon activities (not raids).")
+
+    print(f"{len(roster)} members. Pulling raid history (cached after first run)...")
+
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         for i, out in enumerate(pool.map(fetch_member, roster), 1):
@@ -298,7 +306,13 @@ def main():
         print("\nWarning: history looks truncated by Bungie for: "
               + ", ".join(r[0]["name"] for r in big))
 
-    names = get_activity_names()
+    # Every pair who cleared a raid together, and how many times. This is the
+    # graph the map is drawn from.
+    pair_counts = defaultdict(int)
+    for present in clan_instances.values():
+        for a, b in combinations(sorted(set(present)), 2):
+            pair_counts[(a, b)] += 1
+
     by_member = defaultdict(lambda: {"count": 0, "raids": defaultdict(int),
                                      "partners": defaultdict(int), "last": None})
     for iid, present in clan_instances.items():
@@ -326,78 +340,32 @@ def main():
             continue
         top_raid = max(e["raids"].items(), key=lambda x: x[1])[0]
         partner = max(e["partners"].items(), key=lambda x: x[1])
+        partner_name = lookup.get(partner[0], "?")
         rows.append({
             "name": member["name"],
             "count": e["count"],
             "total": len(runs),
             "top_raid": top_raid,
-            "partner": f"{lookup.get(partner[0], '?')} ({partner[1]})",
+            "partner": f"{partner_name} ({partner[1]})",
+            "partner_name": partner_name,
+            "partner_count": partner[1],
             "last": (e["last"] or "")[:10],
             "status": status,
         })
     rows.sort(key=lambda r: -r["count"])
 
-    write_html(rows, clan_name, len(clan_instances))
+    who = {m["membershipId"]: m["name"] for m in roster}
+    pairs = [(who[a], who[b], w) for (a, b), w in pair_counts.items()
+             if a in who and b in who]
+    write_html(rows, clan_name, len(clan_instances), pairs)
     print(f"Wrote {OUT}")
 
 
-def write_html(rows, clan_name, total):
-    stamp = datetime.now(timezone.utc).strftime("%d %b %Y")
-    body = "\n".join(
-        f"""<tr class="{'priv' if r['status'] != 'ok' else ''}">
-          <td>{i}</td><td>{r['name']}</td><td class="n">{r['count']}</td>
-          <td class="n">{r['total']}</td><td>{r['top_raid']}</td>
-          <td>{r['partner']}</td><td>{r['last']}</td></tr>"""
-        for i, r in enumerate(rows, 1))
-
-    OUT.write_text(f"""<!doctype html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{clan_name} — Clan Raids</title>
-<style>
- body {{ background:#12141a; color:#e6e8ee; font:15px/1.5 system-ui,sans-serif;
-        margin:0; padding:2rem 1rem; }}
- .wrap {{ max-width:900px; margin:0 auto; }}
- h1 {{ font-size:1.6rem; margin:0 0 .2rem; letter-spacing:.02em; }}
- .sub {{ color:#8b90a0; font-size:.9rem; margin-bottom:1.5rem; }}
- table {{ width:100%; border-collapse:collapse; }}
- th {{ text-align:left; font-size:.75rem; text-transform:uppercase;
-       letter-spacing:.08em; color:#8b90a0; padding:.5rem .6rem;
-       border-bottom:1px solid #2a2e3a; cursor:pointer; }}
- td {{ padding:.55rem .6rem; border-bottom:1px solid #1e2129; }}
- tr:hover td {{ background:#171a22; }}
- .n {{ text-align:right; font-variant-numeric:tabular-nums; }}
- .priv {{ opacity:.45; }}
- .foot {{ color:#8b90a0; font-size:.8rem; margin-top:1.5rem; }}
-</style></head><body><div class="wrap">
-<h1>{clan_name} — Clan Raids</h1>
-<div class="sub">{total} raids cleared with {MIN_CLAN_MEMBERS}+ clanmates in the
-fireteam · updated {stamp}</div>
-<table><thead><tr>
-<th>#</th><th>Member</th><th class="n">Clan raids</th><th class="n">All raids</th>
-<th>Most run</th><th>Top partner</th><th>Last</th>
-</tr></thead><tbody>
-{body}
-</tbody></table>
-<div class="foot">Faded rows have a private Bungie profile — their raids can't be
-counted, which also lowers everyone else's number for runs they were in.
-Counts reflect the current roster only; people who've left the clan don't
-count.</div>
-</div>
-<script>
-document.querySelectorAll('th').forEach((th,i)=>th.onclick=()=>{{
-  const tb=th.closest('table').tBodies[0];
-  const rows=[...tb.rows];
-  const num=th.classList.contains('n')||i===0;
-  const dir=th.dataset.d=th.dataset.d==='1'?'-1':'1';
-  rows.sort((a,b)=>{{
-    const x=a.cells[i].textContent, y=b.cells[i].textContent;
-    return dir*(num?(parseFloat(x)||0)-(parseFloat(y)||0):x.localeCompare(y));
-  }});
-  rows.forEach(r=>tb.appendChild(r));
-}});
-</script>
-</body></html>""", encoding="utf-8")
+def write_html(rows, clan_name, total, pairs=()):
+    from render import render
+    OUT.write_text(
+        render(rows, clan_name, total, MIN_CLAN_MEMBERS, PAGE_URL, pairs),
+        encoding="utf-8")
 
 
 if __name__ == "__main__":
